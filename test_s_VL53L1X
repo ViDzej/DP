@@ -1,0 +1,70 @@
+// Zapojení jednotlivých pinů 
+// (blíže vyneseno ve schématu zapojení): 
+// 3v3 - VIN(VL53L0/1XV2)
+// GND - GND(VL53L0/1XV2)
+// D21 - SDA(VL53L0/1XV2)
+// D22 - SCL(VL53L0/1XV2)
+// D23 - Relay IN pin (Output for pump)
+
+// Zavedení knihoven
+#include <Wire.h>
+#include <VL53L1X.h>
+
+VL53L1X sensor;
+// Určení pinu 23 na ESP32 pro ovládání čerpadla
+const int pumpPin = 23; 
+
+void setup()
+{
+  // Určení rychlosti sériového přenosu dat [Baud]
+  Serial.begin(115200);
+  // Inicializace knihovny Wire
+  Wire.begin();
+  // Nastavení frekvence pro sběrnici I2C [Hz]
+  Wire.setClock(400000);
+  // Nastavení pinu pumpPin (pin 23) jako výstupní
+  pinMode(pumpPin, OUTPUT);
+
+  // Při erroru nedostupnosti čidla pro inicializaci 
+  // déle než 0,5 s dojde k výpisu chybové hlášky do 
+  // sériového monitoru
+  sensor.setTimeout(500);
+  if (!sensor.init())
+  {
+    Serial.println("Failed to detect and initialize sensor!");
+    while (1);
+  }
+  
+  // Nastavení módu měření na hodnotu Short, 
+  // který odpovídá rozsahu měření do 1300 mm
+  sensor.setDistanceMode(VL53L1X::Long);
+  // Určení rychlosti měření (jde snížit až na 20ms 
+  // při módu měření krátkých vzdáleností)
+  sensor.setMeasurementTimingBudget(50000);
+
+  // Určení rychlosti vracení hodnot na 0,5s 
+  // (tato hodnota určuje rychlost 
+  // vypisovaných hodnot do sériového monitoru)
+  sensor.startContinuous(500);
+}
+
+void loop()
+{
+  // Výpis hodnot do sériového monitoru
+  Serial.print(sensor.read());
+  // Při výpadku spojení s čidlem vypíše 
+  // do sériového monitoru chybovou hlášku 
+  if (sensor.timeoutOccurred()) 
+  { Serial.print(" TIMEOUT"); }
+
+  Serial.println();
+
+  // Pokud je vzdálenost < 300mm,
+  // nastaví hodnotu pinu pumpPin
+  // na hodnotu HIGH
+  if (sensor.read() < 300) {
+    digitalWrite(pumpPin, HIGH);
+  } else {
+    digitalWrite(pumpPin, LOW);
+  }
+}
