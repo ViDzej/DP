@@ -1,0 +1,47 @@
+#include <Wire.h>
+#include <VL53L1X.h>
+
+VL53L1X sensor;
+
+void setup()
+{
+  // Určení rychlosti sériového přenosu dat [Baud]
+  Serial.begin(115200);   
+  // Inicializace knihovny Wire
+  Wire.begin();           
+  // Nastavení frekvence pro sběrnici I2C [Hz]
+  Wire.setClock(400000);  
+
+  // Při erroru nedostupnosti čidla pro inicializaci 
+  // déle než 0,5 s dojde k výpisu chybové hlášky do 
+  // sériového monitoru
+  sensor.setTimeout(500); 
+  if (!sensor.init())
+  {
+    Serial.println("Chyba inicializace čidla!");
+    while (1);
+  }
+  
+  // Nastavení módu měření na hodnotu Short, 
+  // který odpovídá rozsahu měření do 1300 mm
+  sensor.setDistanceMode(VL53L1X::Short);   
+  // Určení rychlosti měření (jde snížit až na 20ms 
+  // při módu měření krátkých vzdáleností)
+  sensor.setMeasurementTimingBudget(50000); 
+  // Určení rychlosti vracení hodnot na 0,5s 
+  // (tato hodnota určuje rychlost 
+  // vypisovaných hodnot do sériového monitoru)
+  sensor.startContinuous(500);              
+}
+
+void loop()
+{
+  // Výpis hodnot do sériového monitoru
+  Serial.print(sensor.read());                                                
+  // Při výpadku spojení s čidlem vypíše 
+  // do sériového monitoru chybovou hlášku 
+  if (sensor.timeoutOccurred()) 
+  { Serial.print("Výpadek spojení s čidlem"); } 
+
+  Serial.println();
+}
