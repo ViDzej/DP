@@ -1,0 +1,640 @@
+//https://github.com/ViDzej/DP.git
+// Load libraries
+#include <ArduinoJson.h>
+#include <WiFi.h>
+#include <AsyncTCP.h>
+#include <ESPAsyncWebServer.h>
+#include <HTTPClient.h>
+#include <OneWire.h>
+#include <DallasTemperature.h>
+
+
+// Set pin for distance measurement (echo and trigger)  
+#define trigPin 18
+#define echoPin 19
+#define pumpPin 33
+#define allowOverflow 26
+#define onSwitchBtn 25
+
+// Set pin for temperature measurement (sensor DS18B20)
+const int oneWireBus = 4;
+
+// Setting up oneWire library instance for the communication with oneWire devices
+ 
+OneWire oneWire(oneWireBus);
+
+// Připojení knihovny DallasTemperature (DS18B20) k instanci oneWire
+DallasTemperature sensors(&oneWire);
+
+// Login credentials to WiFi
+const char* ssid = "tplink-ja";
+const char* password = "eliskaja";
+
+// Input parameters
+const char* PARAM_INPUT_1 = "output";
+const char* PARAM_INPUT_2 = "state";
+
+const char* FORM_INPUT_1 = "tank1000";
+const char* FORM_INPUT_2 = "tank600";
+const char* FORM_INPUT_3 = "secStopTime";
+const char* FORM_INPUT_4 = "runTime";
+const char* FORM_INPUT_5 = "pumpLitres";
+
+int tank1000 = 1;
+int tank600 = 0;
+long secStopTime = 300000; // 5 min
+long runTime = 1800000; // 30 min
+int minLevel = 20;
+int pumpLitres = 0;
+long distance = 0;
+unsigned long pumpLitresTime = 0;
+
+// Timers settings
+unsigned long lastTime = 0;
+unsigned long timerDelay = 10000;
+
+const char* JSONPage = "192.168.0.109/JSON";
+
+// Create object AsyncWebServer on port 80
+AsyncWebServer server(80);
+
+const char index_html[] PROGMEM = R"rawliteral(
+<!DOCTYPE HTML>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>ESP32 Home</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="icon" href="data:,">
+  <style>
+    html {font-family: Arial; display: inline-block; text-align: center;}
+    h2 {font-size: 3.0rem;}
+    p {font-size: 3.0rem;}
+    body {max-width: 600px; margin:0px auto; padding-bottom: 25px;}
+    .switch {position: relative; display: inline-block; width: 120px; height: 68px} 
+    .switch input {display: none}
+    .slider {position: absolute; top: 0; left: 0; right: 0; bottom: 0; background-color: #ccc; border-radius: 50px}
+    .slider:before {position: absolute; content: ""; height: 52px; width: 52px; left: 8px; bottom: 8px; background-color: #fff; -webkit-transition: .4s; transition: .4s; border-radius: 50px}
+    input:checked+.slider {background-color: #008000}
+    input:checked+.slider:before {-webkit-transform: translateX(52px); -ms-transform: translateX(52px); transform: translateX(52px)}
+a:link{
+  color: black;
+  text-decoration: none;
+}
+a:visited{
+  color: black;
+  text-decoration: none;
+}
+a:hover{
+  color: grey;
+  text-decoration: none;
+}
+
+  </style>
+
+  </style>
+</head>
+<body>
+<div class="topnav">
+  <font size="6" ><b>
+  <a href = "/">HOME</a>
+  <a href = "/JSON">JSON</a>
+  <a href = "/settings">NASTAVENÍ</a>
+  </b></font>
+</div>
+
+<div class="row">
+  <div class="content">
+    <font size="6px" align="center"><h1>  Hlavní stránka </h1></font>
+      <font size="5px" align="center">
+      <p>
+  AKTUÁLNÍ HODNOTY
+  <p>OBJEM  
+  <p><span id="volume">%VOLUME%</span> l</p>
+      </p>
+  <p>TEPLOTA
+  <p><span id="temperaturec">%TEMPERATUREC%</span> °C</p>
+      </p>
+      <font size="5px" align="center"><h2>  Spínač čerpadla </h2></font>
+      <font size="5px" align="center">
+      <p>
+  %BUTTONPLACEHOLDER%
+<script>function toggleCheckbox(element) {
+  var xhr = new XMLHttpRequest();
+  if(element.checked){ xhr.open("GET", "/update?output="+element.id+"&state=1", true); }
+  else { xhr.open("GET", "/update?output="+element.id+"&state=0", true); }
+  xhr.send();
+}
+
+
+setInterval(function(){
+  var xhttp = new XMLHttpRequest();
+  xhttp.onreadystatechange = function() {
+    if (this.readyState == 4 && this.status == 200) {
+      document.getElementById("volume").innerHTML = this.responseText;
+    }
+  };
+  xhttp.open("GET", "/volume", true);
+  xhttp.send();
+}, 1000) ;
+
+setInterval(function(){
+  var xhttp = new XMLHttpRequest();
+  xhttp.onreadystatechange = function() {
+    if (this.readyState == 4 && this.status == 200) {
+      document.getElementById("temperaturec").innerHTML = this.responseText;
+    }
+  };
+  xhttp.open("GET", "/temperaturec", true);
+  xhttp.send();
+}, 1000) ;
+
+
+</script>
+
+</p>
+      
+</div>
+  
+  </div>
+</div>
+
+</body>
+</html>
+)rawliteral";
+
+
+// Replaces placeholder with DHT values
+String processorTemp(const String& var) {
+  //Serial.println(var);
+  if (var == "TEMPERATUREC") {
+    return readDSTemperatureC();
+  }
+  return String();
+}
+
+// Replaces placeholder with DHT values
+String processorDist(const String& var) {
+  //Serial.println(var);
+  if (var == "VOLUME") {
+    return readVolume();
+  }
+  return String();
+}
+
+
+/////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+const char settings_html[] PROGMEM = R"rawliteral(
+<!DOCTYPE HTML>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>ESP32 Settings</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="icon" href="data:,">
+  <style>
+    html {font-family: Arial; display: inline-block; text-align: center;}
+    h2 {font-size: 3.0rem;}
+    p {font-size: 3.0rem;}
+    body {max-width: 600px; margin:0px auto; padding-bottom: 25px;}
+    .switch {position: relative; display: inline-block; width: 120px; height: 68px} 
+    .switch input {display: none}
+    .slider {position: absolute; top: 0; left: 0; right: 0; bottom: 0; background-color: #ccc; border-radius: 50px}
+    .slider:before {position: absolute; content: ""; height: 52px; width: 52px; left: 8px; bottom: 8px; background-color: #fff; -webkit-transition: .4s; transition: .4s; border-radius: 50px}
+    input:checked+.slider {background-color: #008000}
+    input:checked+.slider:before {-webkit-transform: translateX(52px); -ms-transform: translateX(52px); transform: translateX(52px)}
+a:link{
+  color: black;
+  text-decoration: none;
+}
+a:visited{
+  color: black;
+  text-decoration: none;
+}
+a:hover{
+  color: grey;
+  text-decoration: none;
+}
+
+  </style>
+</head>
+<body>
+<div class="topnav">
+<font size="6" ><b>
+<a href = "/">HOME</a>
+<a href = "/JSON">JSON</a>
+<a href = "/settings">NASTAVENÍ</a>
+</b></font>
+</div>
+
+<p>
+<font size="6px" align="center">
+    <form action = "/get">
+      Nádrže 1000 l: 
+        <input type="number" min="0" id="tank1000" name="tank1000" style='width:4em'>
+        <input type="submit" value="OK">
+    </form>
+    
+    <form action = "/get">
+      Nádrže 600 l: 
+        <input type="number" min="0" id="tank600" name="tank600" style='width:4em'>
+        <input type="submit" value="OK">
+    </form>
+</br>    
+    <form action = "/get">
+      Bezpečnostní přestávka [min]: 
+        <input type="number" min="0" id="secStopTime" name="secStopTime" style='width:4em'>
+        <input type="submit" value="OK">
+    </form>
+
+    <form action = "/get">
+      Běh čerpadla [min]:
+        <input type="number" min="0" id="runTime" name="runTime" style='width:4em'>
+        <input type="submit" value="OK">
+    </form>
+</br>
+    Povolení přetečení nádrže:
+    %BUTTONPLACEHOLDER2%
+<script>function toggleCheckbox(element) {
+  var xhr = new XMLHttpRequest();
+  if(element.checked){ xhr.open("GET", "/update?output="+element.id+"&state=1", true); }
+  else { xhr.open("GET", "/update?output="+element.id+"&state=0", true); }
+  xhr.send();
+}
+    
+    <form action="/get">
+      Odčerpat vodu [l]:    
+        <input type="number" min="1" id="pumpLitres" name="pumpLitres" style='width:4em'>
+        <input type="submit" value="OK">
+    </form>     
+
+</font>
+  
+</body>
+</html>
+)rawliteral";
+
+/////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+const char JSON_html[] PROGMEM = R"rawliteral(
+<!DOCTYPE HTML>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>ESP Web Server</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <link rel="icon" href="data:,">
+<style>
+a:link{
+  color: black;
+  text-decoration: none;
+}
+a:visited{
+  color: black;
+  text-decoration: none;
+}
+a:hover{
+  color: grey;
+  text-decoration: none;
+}
+  </style>
+</head>
+
+<body>
+<div class="topnav">
+<font size="6" ><b>
+<a href = "/">HOME</a>
+<a href = "/JSON">JSON</a>
+<a href = "/settings">NASTAVENÍ</a>
+</b></font>
+</div>
+
+  </body>
+</html>
+)rawliteral";
+
+/////////////////////////////////////////////////////////////////////////////////////////////////////////
+
+// Function - set maximal level of water based on given tanks 
+unsigned long getMaxLevel(){
+unsigned long maxLevel;
+  if(tank600>0){
+    maxLevel = 90;
+  }
+  else if(tank1000 > 0){
+    maxLevel = 80;  
+  }
+  else{
+    maxLevel = 999;  
+  }
+  return maxLevel;
+}
+
+// Function - get if current water level is above set minimum
+bool getMinLevel(){
+  if((125-distance)<minLevel){
+    return true;
+  }
+  else{
+    return false;
+    }
+}
+  
+// Function - get current temperature from sensor DS18B20
+String readDSTemperatureC() {
+  // Call sensors.requestTemperatures() to issue a global temperature and Requests to all devices on the bus
+  sensors.requestTemperatures();
+  float tempC = sensors.getTempCByIndex(0);
+
+  if (tempC == -127.00) {
+    Serial.println("Failed to read from DS18B20 sensor");
+    return "--";
+  } else {
+    //Serial.print("Temperature Celsius: ");
+    Serial.println(tempC);
+  }
+  return String(tempC);
+}
+
+
+// Function - get current water volume in tanks
+String readVolume() {
+  long duration, volume;
+  digitalWrite(trigPin, LOW);  // Added this line
+  delayMicroseconds(2); // Added this line
+  digitalWrite(trigPin, HIGH);
+  delayMicroseconds(10); // Added this line
+  digitalWrite(trigPin, LOW);
+  duration = pulseIn(echoPin, HIGH);
+  distance = (duration/2) / 29.1;
+  trigMax();
+  if (distance >= 500 || distance <= 0){
+    Serial.println("Out of range");
+  }
+  else {
+//    Serial.print(distance);
+//    Serial.println(" cm");
+  }
+  volume=(tank1000*((125 - distance)*11.11))+(tank600*((125-distance)*6.66));
+  return String(volume);
+}
+/////////////////////////////////////////////////////////////////////////////////////////// OBJEM = (počet 1000l nádrží * ((Výška senzoru - naměřená vzdálenost) * 11.11)) + (počet 600l nádrží * ((výška senzoru - naměřená vzdálenost) * 6.66));
+  
+// Function - trigMax
+bool trigMax(){
+  if (digitalRead(26) == LOW){
+    if ((125-distance) > getMaxLevel()){
+      return true;
+    }
+    else{
+      return false;  
+    }
+  }
+  else{
+    return false;  
+  } 
+}
+
+
+// Function - pumpLitres
+bool pumpXLitres(){
+  if (pumpLitres == 0){
+    return false;
+    }
+  else{
+    if(pumpXLitres()==false){
+      unsigned long pumpLitresTime = millis()+(int(((pumpLitres/7)/30)*5+(pumpLitres/7)))*60000;
+      return true;
+    }  
+    else{
+      if(pumpLitresTime <= millis()){
+        pumpLitresTime = 0;
+        pumpLitres = 0;
+        return false;
+      }
+    }
+  }
+}
+
+
+// Function - ON-OFF switch
+String processor(const String& var){
+  if(var == "BUTTONPLACEHOLDER"){
+    String buttons = "";
+    buttons += "<label class=\"switch\"><input type=\"checkbox\" onchange=\"toggleCheckbox(this)\" id=\"25\" " + outputState(25) + "><span class=\"slider\"></span></label>";
+    return buttons;
+  }
+  return String();
+}
+
+// Var - allowOverflow switch
+String processor2(const String& var){
+  if(var == "BUTTONPLACEHOLDER2"){
+    String buttons = "";
+    buttons += "<label class=\"switch\"><input type=\"checkbox\" onchange=\"toggleCheckbox(this)\" id=\"26\" " + outputState(26) + "><span class=\"slider\"></span></label>";
+    return buttons;
+  }
+  return String();
+}
+
+String outputState(int output){
+  if(digitalRead(output)){
+    return "checked";
+  }
+  else {
+    return "";
+  }
+}
+
+  void notFound(AsyncWebServerRequest *request) {
+    request->send(404, "text/plain", "Not found");
+  }
+
+void setup(){
+  // Open serial port 
+  Serial.begin(9600);
+  Serial.println();
+
+  // Pin inicialization
+  pinMode(25, OUTPUT);
+  digitalWrite(25, LOW);
+  pinMode(26, OUTPUT);
+  digitalWrite(26, LOW);
+  pinMode(33, OUTPUT);
+  digitalWrite(33, LOW);
+  
+// DS18B20 sensor inicialization 
+  sensors.begin();
+  pinMode(trigPin, OUTPUT);
+  pinMode(echoPin, INPUT);
+  pinMode(pumpPin, OUTPUT);
+  
+  // Connect to WiFi
+  WiFi.begin(ssid, password);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(1000);
+    Serial.println("Connecting to WiFi..");
+  }
+
+  // IP address printout
+  Serial.println(WiFi.localIP());
+
+  // Path to "/" page
+  server.on("/", HTTP_GET, [](AsyncWebServerRequest *request){
+    request->send_P(200, "text/html", index_html, processor);
+  });
+  
+  // GET request - Temperature
+  server.on("/temperaturec", HTTP_GET, [](AsyncWebServerRequest * request) {
+    request->send_P(200, "text/plain", readDSTemperatureC().c_str());
+  });
+
+  // GET request - Volume
+  server.on("/volume", HTTP_GET, [](AsyncWebServerRequest * request) {
+    request->send_P(200, "text/plain", readVolume().c_str());
+  });
+
+  // Path to "/Settings" page
+  server.on("/settings", HTTP_GET, [](AsyncWebServerRequest *request){
+    request->send_P(200, "text/html", settings_html, processorTemp);
+  });
+
+  // Path to "/JSON" page
+  server.on("/JSON", HTTP_GET, [](AsyncWebServerRequest *request){
+    request->send_P(200, "text/html", "", processor);
+  });
+
+  // Sending GET request to <ESP_IP>/update?output=<inputMessage1>&state=<inputMessage2>
+  server.on("/update", HTTP_GET, [] (AsyncWebServerRequest *request) {
+    String inputMessage1;
+    String inputMessage2;
+    // GET input1 value on <ESP_IP>/update?output=<inputMessage1>&state=<inputMessage2>
+    if (request->hasParam(PARAM_INPUT_1) && request->hasParam(PARAM_INPUT_2)) {
+      inputMessage1 = request->getParam(PARAM_INPUT_1)->value();
+      inputMessage2 = request->getParam(PARAM_INPUT_2)->value();
+      digitalWrite(inputMessage1.toInt(), inputMessage2.toInt());
+    }
+    else {
+      inputMessage1 = "No message sent";
+      inputMessage2 = "No message sent";
+    }
+    Serial.print("GPIO: ");
+    Serial.print(inputMessage1);
+    Serial.print(" - Set to: ");
+    Serial.println(inputMessage2);
+    request->send(200, "text/plain", "OK");
+  });
+
+// Get number of used tanks
+ server.on("/get", HTTP_GET, [] (AsyncWebServerRequest *request) {
+    String inputMessage;
+    String inputParam;
+    // GET tank1000 value on <ESP_IP>/get?tank1000=<inputMessage>
+    if (request->hasParam(FORM_INPUT_1)) {
+      Serial.println("IN GET tank1000");
+      inputMessage = request->getParam(FORM_INPUT_1)->value();
+      inputParam = FORM_INPUT_1;
+      tank1000 = (request->getParam(FORM_INPUT_1)->value()).toInt();
+    }
+    // GET tank600 value on <ESP_IP>/get?tank600=<inputMessage>
+    else if (request->hasParam(FORM_INPUT_2)) {
+      Serial.println("IN GET tank600");
+      inputMessage = request->getParam(FORM_INPUT_2)->value();
+      inputParam = FORM_INPUT_2;
+      tank600 = (request->getParam(FORM_INPUT_2)->value()).toInt();
+    }
+    // GET secStopTime value on <ESP_IP>/get?secStopTime=<inputMessage>
+    else if (request->hasParam(FORM_INPUT_3)) {
+      Serial.println("IN GET secStopTime");
+      inputMessage = request->getParam(FORM_INPUT_3)->value();
+      inputParam = FORM_INPUT_3;
+      secStopTime = (request->getParam(FORM_INPUT_3)->value()).toInt();
+    }
+    else {
+      inputMessage = "No message sent";
+      inputParam = "none";
+    }
+    Serial.println(inputMessage);
+    request->send(200, "text/html", "Proměnné ("+ inputParam + ") byla změněna hodnota na: " + inputMessage +"<br><a href=\"/settings\">Zpět do settings</a>");
+  });
+  server.onNotFound(notFound);
+
+
+
+  // Start server
+  server.begin();
+}
+
+void loop() {
+  sensors.requestTemperatures();
+  
+  if ((millis() - lastTime) > timerDelay) {
+    if(WiFi.status()== WL_CONNECTED){
+      HTTPClient http;
+      float temperatureC = sensors.getTempCByIndex(0);
+      Serial.print(temperatureC);
+      Serial.println("ºC");
+  
+      // IP address with path
+      http.begin(JSONPage);
+
+      // Specify content-type
+//http.addHeader("Content-Type", "application/x-www-form-urlencoded");
+        http.addHeader("Content-Type", "application/json");
+      // Data to send with HTTP POST
+
+
+      StaticJsonDocument<200> doc;
+    // Add values in the document
+    //
+    doc["tank1000"] = tank1000;
+    doc["tank600"] = tank600;
+    doc["volume"] = readVolume();
+    doc["temperature"] = temperatureC;
+    doc["secStopTime"] = secStopTime;
+    doc["runTime"] = runTime;
+     
+    String requestData;
+    serializeJson(doc, requestData);
+    
+      // Send HTTP POST request
+      Serial.println(requestData);
+      int httpResponseCode = http.POST(requestData);
+
+      http.end();
+    }
+  lastTime = millis();
+//  Serial.println(FORM_INPUT_1);
+//  Serial.println(FORM_INPUT_2);
+//  Serial.println(FORM_INPUT_3);
+//  Serial.println(tank1000);
+//  Serial.println(tank600);
+//  Serial.println(secStopTime);
+  }
+
+////////////////////////////////////////////////////// if there is any function, which should put pump to run, returning true -> switch pump ON 
+  
+  int onSwitch = digitalRead(25);  
+  
+  if((pumpXLitres() == true || trigMax() == true || onSwitch == HIGH)&&(getMinLevel() == false)){  
+    unsigned long currentMillis = millis();
+    unsigned long previousMillis = 0;
+    bool secStop = false;
+
+    if((currentMillis - previousMillis >= runTime) && (secStop == false)){
+          
+      digitalWrite(33, LOW);
+      previousMillis = currentMillis;
+      secStop = true;
+    } 
+    else if((currentMillis - previousMillis >= secStopTime) && (secStop == true)){
+      digitalWrite(33, HIGH);
+      previousMillis = currentMillis;
+      secStop = false;
+    }
+  }
+  else{
+    digitalWrite(33, LOW);  
+  }
+}
